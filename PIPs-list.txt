@@ -1,1 +1,1 @@
-pip install flask flask-login flask-wtf python-dotenv gunicorn flask-limiter pyotp qrcode
+pip install Flask Flask-Login Flask-WTF WTForms Werkzeug python-dotenv Flask-Limiter pyotp gunicorn

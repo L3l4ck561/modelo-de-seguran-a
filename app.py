@@ -36,8 +36,6 @@ TOTP_SECRET = os.getenv("ADMIN_2FA_SECRET")
 if not all([app.secret_key, ADMIN_USER, ADMIN_PASSWORD_HASH, TOTP_SECRET]):
     raise RuntimeError("Variáveis críticas não definidas.")
 
-CF_ALLOWED_DOMAIN = os.getenv("CF_ALLOWED_DOMAIN")
-
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 app.config.update(
@@ -128,29 +126,6 @@ def secure_headers(response):
     return response
 
 # =========================================================
-# CLOUDLFARE + ORIGIN CHECK
-# =========================================================
-
-@app.before_request
-def security_layers():
-    ip = request.remote_addr
-
-    if is_ip_blocked(ip):
-        abort(429)
-
-    if ENV == "production":
-        user_email = request.headers.get("CF-Access-Authenticated-User-Email")
-        if not user_email:
-            abort(403)
-
-        if CF_ALLOWED_DOMAIN and not user_email.endswith(CF_ALLOWED_DOMAIN):
-            abort(403)
-
-        origin = request.headers.get("Origin")
-        if origin and CF_ALLOWED_DOMAIN and CF_ALLOWED_DOMAIN not in origin:
-            abort(403)
-
-# =========================================================
 # TIMEOUT
 # =========================================================
 
@@ -196,9 +171,22 @@ def constant_time_login_check(input_user, input_pass):
 # =========================================================
 
 @app.route("/admin/login", methods=["GET", "POST"])
-@limiter.limit("5 per minute")
+@limiter.limit("5 per minuto")
 def login():
     ip = request.remote_addr
+
+    # Verifica se o IP está bloqueado
+    if is_ip_blocked(ip):
+        flash("Seu IP está temporariamente bloqueado devido a múltiplas tentativas falhas.")
+        logger.warning(f"IP bloqueado tentou login | IP: {ip} | UA: {request.headers.get('User-Agent')}")
+        return render_template_string("""
+            <h2>Login Seguro</h2>
+            {% with messages = get_flashed_messages() %}
+            {% if messages %}
+            <p style="color:red;">{{ messages[0] }}</p>
+            {% endif %}
+            {% endwith %}
+        """)
 
     form = LoginForm()
     if form.validate_on_submit():
@@ -210,6 +198,7 @@ def login():
             session["pre_2fa"] = True
             return redirect(url_for("two_factor"))
 
+        # Registra falha e possivelmente bloqueia IP
         register_failed_attempt(ip)
 
         logger.warning(
