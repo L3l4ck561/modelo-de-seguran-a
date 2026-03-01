@@ -14,6 +14,8 @@ from werkzeug.security import check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+import redis
 import pyotp
 
 # =========================================================
@@ -43,6 +45,20 @@ app.config.update(
 
 csrf = CSRFProtect(app)
 
+# =========================================================
+# REDIS
+# =========================================================
+
+REDIS_URL = os.getenv("REDIS_URL")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL não definido!")
+
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+# =========================================================
+# VARIÁVEIS CRÍTICAS
+# =========================================================
+
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
 TOTP_SECRET = os.getenv("ADMIN_2FA_SECRET")
@@ -66,14 +82,36 @@ def load_user(user_id):
     return Admin() if user_id == "admin" else None
 
 # =========================================================
-# RATE LIMIT
+# RATE LIMIT COM REDIS
 # =========================================================
 
 limiter = Limiter(
-    key_func=lambda: request.headers.get("X-Forwarded-For", request.remote_addr),
+    key_func=get_remote_address,
+    storage_uri=REDIS_URL,
     app=app,
     default_limits=["200 per day", "50 per hour"]
 )
+
+# =========================================================
+# BLOQUEIO PROGRESSIVO COM REDIS
+# =========================================================
+
+MAX_ATTEMPTS = 10
+BLOCK_TIME = 900  # 15 minutos
+
+def get_client_ip():
+    return request.headers.get("X-Forwarded-For", request.remote_addr)
+
+def is_ip_blocked(ip):
+    return redis_client.exists(f"blocked:{ip}")
+
+def register_failed_attempt(ip):
+    key = f"fail:{ip}"
+    attempts = redis_client.incr(key)
+    redis_client.expire(key, BLOCK_TIME)
+
+    if attempts >= MAX_ATTEMPTS:
+        redis_client.setex(f"blocked:{ip}", BLOCK_TIME, "1")
 
 # =========================================================
 # SESSION TIMEOUT
@@ -117,13 +155,14 @@ def security_delay():
 
 def constant_time_login_check(user, password):
     return (
-        hmac.compare_digest(user.lower().strip().encode(),
-                            ADMIN_USER.lower().strip().encode())
+        hmac.compare_digest(
+            user.lower().strip().encode(),
+            ADMIN_USER.lower().strip().encode()
+        )
         and check_password_hash(ADMIN_PASSWORD_HASH, password)
     )
 
 def regenerate_session():
-    """Proteção real contra session fixation"""
     data = dict(session)
     session.clear()
     session.update(data)
@@ -136,6 +175,12 @@ def regenerate_session():
 @app.route("/admin/login", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
 def login():
+    ip = get_client_ip()
+
+    if is_ip_blocked(ip):
+        flash("IP temporariamente bloqueado.")
+        return "IP bloqueado temporariamente", 403
+
     form = LoginForm()
 
     if form.validate_on_submit():
@@ -143,14 +188,17 @@ def login():
             form.username.data,
             form.password.data
         )
+
         security_delay()
 
         if valid:
+            redis_client.delete(f"fail:{ip}")
             session.clear()
             session["pre_2fa_user"] = "admin"
             regenerate_session()
             return redirect(url_for("two_factor"))
 
+        register_failed_attempt(ip)
         flash("Credenciais inválidas")
 
     return render_template_string("""
@@ -170,17 +218,24 @@ def two_factor():
     if session.get("pre_2fa_user") != "admin":
         return redirect(url_for("login"))
 
+    ip = get_client_ip()
+
+    if is_ip_blocked(ip):
+        return redirect(url_for("login"))
+
     form = TwoFactorForm()
 
     if form.validate_on_submit():
         totp = pyotp.TOTP(TOTP_SECRET)
 
         if totp.verify(form.token.data.strip(), valid_window=1):
+            redis_client.delete(f"fail:{ip}")
             session.clear()
             regenerate_session()
             login_user(Admin(), fresh=True)
             return redirect(url_for("dashboard"))
 
+        register_failed_attempt(ip)
         flash("Código inválido")
 
     return render_template_string("""
@@ -195,7 +250,7 @@ def two_factor():
 @app.route("/admin/dashboard")
 @login_required
 def dashboard():
-    return "🔥 Admin protegido por camadas reais de segurança"
+    return "🔥 Admin protegido por Redis + 2FA + CSRF + RateLimit"
 
 @app.route("/admin/logout")
 @login_required
@@ -203,17 +258,6 @@ def logout():
     logout_user()
     session.clear()
     return redirect(url_for("login"))
-
-# =========================================================
-# DEBUG
-# =========================================================
-
-@app.route("/debug-session")
-def debug_session():
-    return {
-        "session_keys": list(session.keys()),
-        "csrf_in_session": "csrf_token" in session
-    }
 
 # =========================================================
 
