@@ -3,10 +3,9 @@ import time
 import random
 import hmac
 import logging
-import ipaddress
 from datetime import timedelta, datetime
 
-from flask import Flask, render_template_string, redirect, url_for, request, abort, flash, session
+from flask import Flask, render_template_string, redirect, url_for, request, flash, session
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user
 from flask_wtf import FlaskForm, CSRFProtect
 from wtforms import PasswordField, StringField
@@ -19,34 +18,34 @@ from flask_limiter.util import get_remote_address
 import pyotp
 
 # =========================================================
-# CONFIG INICIAL
+# CONFIGURAÇÃO INICIAL
 # =========================================================
 
 load_dotenv()
-ENV = os.getenv("ENV", "development")
+ENV = os.getenv("ENV", "production")  # produção por padrão
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY")
+if not app.secret_key:
+    raise RuntimeError("SECRET_KEY não definido!")
 
-# Confia no proxy do Render
+# Proxy do Render
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # Variáveis críticas
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
 TOTP_SECRET = os.getenv("ADMIN_2FA_SECRET")
-ADMIN_ALLOWED_IP = os.getenv("ADMIN_ALLOWED_IP")  # IP público permitido
 
-if not all([app.secret_key, ADMIN_USER, ADMIN_PASSWORD_HASH, TOTP_SECRET]):
-    raise RuntimeError("Variáveis críticas não definidas.")
+if not all([ADMIN_USER, ADMIN_PASSWORD_HASH, TOTP_SECRET]):
+    raise RuntimeError("Variáveis críticas não definidas!")
 
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
-
+# Configuração de sessão segura
 app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(minutes=15),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
-    SESSION_COOKIE_SECURE=True if ENV == "production" else False,
+    SESSION_COOKIE_SECURE=True,  # exige HTTPS em produção
     SESSION_COOKIE_NAME="__Host-admin_session",
     WTF_CSRF_TIME_LIMIT=300
 )
@@ -74,38 +73,18 @@ FAILED_LOGINS = {}
 BLOCKED_IPS = {}
 
 def is_ip_blocked(ip):
-    if ip in BLOCKED_IPS:
-        if time.time() < BLOCKED_IPS[ip]:
-            return True
-        else:
-            del BLOCKED_IPS[ip]
+    if ip in BLOCKED_IPS and time.time() < BLOCKED_IPS[ip]:
+        return True
+    BLOCKED_IPS.pop(ip, None)
     return False
 
 def register_failed_attempt(ip):
     now = time.time()
-    attempts = FAILED_LOGINS.get(ip, [])
-    # só mantém tentativas nos últimos 15 minutos
-    attempts = [t for t in attempts if now - t < 900]
+    attempts = [t for t in FAILED_LOGINS.get(ip, []) if now - t < 900]  # últimas 15 min
     attempts.append(now)
     FAILED_LOGINS[ip] = attempts
     if len(attempts) >= 10:
         BLOCKED_IPS[ip] = now + 900
-
-# =========================================================
-# VERIFICAÇÃO DE IP PERMITIDO
-# =========================================================
-
-def is_ip_allowed(ip):
-    if not ADMIN_ALLOWED_IP:
-        return True  # libera todos se variável não estiver definida
-
-    try:
-        # Se for subnet (ex: /64) ou IP único, ambos funcionam
-        network = ipaddress.ip_network(ADMIN_ALLOWED_IP, strict=False)
-        return ipaddress.ip_address(ip) in network
-    except ValueError:
-        logger.error("ADMIN_ALLOWED_IP inválido.")
-        return False
 
 # =========================================================
 # LOGIN MANAGER
@@ -120,9 +99,7 @@ class Admin(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    if user_id == "admin":
-        return Admin()
-    return None
+    return Admin() if user_id == "admin" else None
 
 # =========================================================
 # HEADERS DE SEGURANÇA
@@ -166,7 +143,7 @@ class TwoFactorForm(FlaskForm):
     token = StringField("Código 2FA", validators=[DataRequired()])
 
 # =========================================================
-# SEGURANÇA LOGIN
+# FUNÇÕES DE LOGIN
 # =========================================================
 
 def security_delay():
@@ -178,7 +155,7 @@ def constant_time_login_check(input_user, input_pass):
     return user_valid and pass_valid
 
 # =========================================================
-# LOGIN
+# ROTAS
 # =========================================================
 
 @app.route("/admin/login", methods=["GET", "POST"])
@@ -186,38 +163,28 @@ def constant_time_login_check(input_user, input_pass):
 def login():
     ip = request.remote_addr
 
-    # bloqueio de IP
     if is_ip_blocked(ip):
-        flash("Seu IP está temporariamente bloqueado devido a múltiplas tentativas falhas.")
-        logger.warning(f"IP bloqueado tentou login | IP: {ip} | UA: {request.headers.get('User-Agent')}")
+        flash("Seu IP está temporariamente bloqueado.")
+        logger.warning(f"IP bloqueado tentou login | IP: {ip}")
         return render_template_string("<p style='color:red;'>IP bloqueado temporariamente.</p>")
-
-    # whitelist de IP
-    if not is_ip_allowed(ip):
-        flash("Seu IP não tem permissão para acessar este sistema.")
-        logger.warning(f"IP não autorizado tentou login | IP: {ip} | UA: {request.headers.get('User-Agent')}")
-        return render_template_string("<p style='color:red;'>IP não autorizado.</p>")
 
     form = LoginForm()
     if form.validate_on_submit():
         valid = constant_time_login_check(form.username.data, form.password.data)
         security_delay()
-
         if valid:
             session.clear()
             session["pre_2fa"] = True
             return redirect(url_for("two_factor"))
 
         register_failed_attempt(ip)
-        logger.warning(f"Falha login | IP: {ip} | UA: {request.headers.get('User-Agent')}")
         flash("Credenciais inválidas")
+        logger.warning(f"Falha login | IP: {ip}")
 
     return render_template_string("""
         <h2>Login Seguro</h2>
         {% with messages = get_flashed_messages() %}
-        {% if messages %}
-        <p style="color:red;">{{ messages[0] }}</p>
-        {% endif %}
+          {% if messages %}<p style="color:red;">{{ messages[0] }}</p>{% endif %}
         {% endwith %}
         <form method="POST">
             {{ form.hidden_tag() }}
@@ -226,10 +193,6 @@ def login():
             <button type="submit">Entrar</button>
         </form>
     """, form=form)
-
-# =========================================================
-# 2FA
-# =========================================================
 
 @app.route("/admin/2fa", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
@@ -260,18 +223,10 @@ def two_factor():
         </form>
     """, form=form)
 
-# =========================================================
-# DASHBOARD
-# =========================================================
-
 @app.route("/admin/dashboard")
 @login_required
 def dashboard():
     return "🔥 Admin protegido por camadas reais de segurança"
-
-# =========================================================
-# LOGOUT
-# =========================================================
 
 @app.route("/admin/logout")
 @login_required
@@ -281,7 +236,7 @@ def logout():
     return redirect(url_for("login"))
 
 # =========================================================
-# Debugs
+# DEBUGS (opcional)
 # =========================================================
 
 @app.route("/debug-ip")
@@ -304,4 +259,4 @@ def debug_scheme():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=(ENV=="development"))
+    app.run(host="0.0.0.0", port=port, debug=False)
