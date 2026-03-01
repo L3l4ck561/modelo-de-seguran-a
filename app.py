@@ -28,6 +28,9 @@ ENV = os.getenv("ENV", "development")
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY")
 
+# Confia no proxy do Render
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
 # Variáveis críticas
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
@@ -278,7 +281,7 @@ def logout():
     return redirect(url_for("login"))
 
 # =========================================================
-# MAIN
+# Debugs
 # =========================================================
 
 @app.route("/debug-ip")
@@ -287,6 +290,17 @@ def debug_ip():
     remote_addr: {request.remote_addr}<br>
     x_forwarded_for: {request.headers.get('X-Forwarded-For')}<br>
     """
+
+@app.route("/debug-scheme")
+def debug_scheme():
+    return f"""
+    scheme: {request.scheme}<br>
+    is_secure: {request.is_secure}<br>
+    """
+
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
