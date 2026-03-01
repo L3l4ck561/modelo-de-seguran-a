@@ -2,6 +2,7 @@ import os
 import time
 import random
 import hmac
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -26,7 +27,6 @@ load_dotenv()
 ENV = os.getenv("ENV", "production")
 
 app = Flask(__name__)
-
 secret_key = os.getenv("SECRET_KEY")
 if not secret_key:
     raise RuntimeError("SECRET_KEY não definido!")
@@ -109,7 +109,6 @@ def register_failed_attempt(ip):
     key = f"fail:{ip}"
     attempts = redis_client.incr(key)
     redis_client.expire(key, BLOCK_TIME)
-
     if attempts >= MAX_ATTEMPTS:
         redis_client.setex(f"blocked:{ip}", BLOCK_TIME, "1")
 
@@ -121,10 +120,8 @@ def register_failed_attempt(ip):
 def session_timeout():
     if not session:
         return
-
     session.permanent = True
     now = datetime.now(timezone.utc)
-
     if "last_activity" in session:
         last = datetime.fromisoformat(session["last_activity"])
         if (now - last).total_seconds() > 900:
@@ -132,7 +129,6 @@ def session_timeout():
             session.clear()
             flash("Sessão expirada.")
             return redirect(url_for("login"))
-
     session["last_activity"] = now.isoformat()
 
 # =========================================================
@@ -168,6 +164,16 @@ def regenerate_session():
     session.update(data)
     session.modified = True
 
+def device_fingerprint():
+    """
+    Gera hash leve do dispositivo do usuário
+    """
+    ip = get_client_ip() or ""
+    ua = request.headers.get("User-Agent", "")
+    accept = request.headers.get("Accept", "")
+    raw = f"{ip}|{ua}|{accept}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
 # =========================================================
 # ROTAS
 # =========================================================
@@ -176,19 +182,13 @@ def regenerate_session():
 @limiter.limit("5 per minute")
 def login():
     ip = get_client_ip()
-
     if is_ip_blocked(ip):
         flash("IP temporariamente bloqueado.")
         return "IP bloqueado temporariamente", 403
 
     form = LoginForm()
-
     if form.validate_on_submit():
-        valid = constant_time_login_check(
-            form.username.data,
-            form.password.data
-        )
-
+        valid = constant_time_login_check(form.username.data, form.password.data)
         security_delay()
 
         if valid:
@@ -214,25 +214,26 @@ def login():
 @app.route("/admin/2fa", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
 def two_factor():
-
     if session.get("pre_2fa_user") != "admin":
         return redirect(url_for("login"))
 
     ip = get_client_ip()
-
     if is_ip_blocked(ip):
         return redirect(url_for("login"))
 
     form = TwoFactorForm()
-
     if form.validate_on_submit():
         totp = pyotp.TOTP(TOTP_SECRET)
-
         if totp.verify(form.token.data.strip(), valid_window=1):
             redis_client.delete(f"fail:{ip}")
             session.clear()
             regenerate_session()
             login_user(Admin(), fresh=True)
+
+            # SALVANDO DEVICE FINGERPRINT NO REDIS (7 dias)
+            fingerprint = device_fingerprint()
+            redis_client.setex(f"fingerprint:admin", 7*24*3600, fingerprint)
+
             return redirect(url_for("dashboard"))
 
         register_failed_attempt(ip)
@@ -250,7 +251,16 @@ def two_factor():
 @app.route("/admin/dashboard")
 @login_required
 def dashboard():
-    return "🔥 Admin protegido por Redis + 2FA + CSRF + RateLimit"
+    # Validando Device Fingerprint
+    saved_fp = redis_client.get("fingerprint:admin")
+    current_fp = device_fingerprint()
+    if saved_fp and saved_fp != current_fp:
+        flash("Novo dispositivo detectado. Confirme sua identidade.")
+        logout_user()
+        session.clear()
+        return redirect(url_for("login"))
+
+    return "🔥 Admin protegido por Redis + 2FA + CSRF + Device Fingerprint + RateLimit"
 
 @app.route("/admin/logout")
 @login_required
@@ -260,7 +270,22 @@ def logout():
     return redirect(url_for("login"))
 
 # =========================================================
+# DEBUG
+# =========================================================
 
+@app.route("/debug-session")
+def debug_session():
+    return {
+        "session_keys": list(session.keys()),
+        "csrf_in_session": "csrf_token" in session
+    }
+
+@app.route("/debug-redis")
+def debug_redis():
+    redis_client.set("healthcheck", "OK", ex=30)
+    return redis_client.get("healthcheck") or "No connection"
+
+# =========================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=(ENV != "production"))
