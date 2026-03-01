@@ -186,10 +186,10 @@ def login():
         return render_template_string("<p style='color:red;'>IP bloqueado temporariamente.</p>")
 
     # whitelist de IP
-    # if not is_ip_allowed(ip):
-    #     flash("Seu IP não tem permissão para acessar este sistema.")
-    #     logger.warning(f"IP não autorizado tentou login | IP: {ip} | UA: {request.headers.get('User-Agent')}")
-    #     return render_template_string("<p style='color:red;'>IP não autorizado.</p>")
+    if not is_ip_allowed(ip):
+        flash("Seu IP não tem permissão para acessar este sistema.")
+        logger.warning(f"IP não autorizado tentou login | IP: {ip} | UA: {request.headers.get('User-Agent')}")
+        return render_template_string("<p style='color:red;'>IP não autorizado.</p>")
 
     form = LoginForm()
     if form.validate_on_submit():
