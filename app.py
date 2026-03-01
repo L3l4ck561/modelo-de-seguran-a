@@ -52,7 +52,6 @@ csrf = CSRFProtect(app)
 REDIS_URL = os.getenv("REDIS_URL")
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL não definido!")
-
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # =========================================================
@@ -62,7 +61,6 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
 TOTP_SECRET = os.getenv("ADMIN_2FA_SECRET")
-
 if not all([ADMIN_USER, ADMIN_PASSWORD_HASH, TOTP_SECRET]):
     raise RuntimeError("Variáveis críticas não definidas!")
 
@@ -132,6 +130,32 @@ def session_timeout():
     session["last_activity"] = now.isoformat()
 
 # =========================================================
+# DEVICE FINGERPRINT CHECK
+# =========================================================
+
+@app.before_request
+def check_device_fingerprint():
+    if not session.get("_user_id"):
+        return
+    # Pulando primeira verificação após 2FA
+    if session.pop("skip_fp_check", False):
+        return
+    saved_fp = redis_client.get("fingerprint:admin")
+    current_fp = device_fingerprint()
+    if saved_fp and saved_fp != current_fp:
+        flash("Novo dispositivo detectado. Confirme sua identidade.")
+        logout_user()
+        session.clear()
+        return redirect(url_for("login"))
+
+def device_fingerprint():
+    ip = get_client_ip() or ""
+    ua = request.headers.get("User-Agent", "")
+    accept = request.headers.get("Accept", "")
+    raw = f"{ip}|{ua}|{accept}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+# =========================================================
 # FORMS
 # =========================================================
 
@@ -151,10 +175,7 @@ def security_delay():
 
 def constant_time_login_check(user, password):
     return (
-        hmac.compare_digest(
-            user.lower().strip().encode(),
-            ADMIN_USER.lower().strip().encode()
-        )
+        hmac.compare_digest(user.lower().strip().encode(), ADMIN_USER.lower().strip().encode())
         and check_password_hash(ADMIN_PASSWORD_HASH, password)
     )
 
@@ -163,16 +184,6 @@ def regenerate_session():
     session.clear()
     session.update(data)
     session.modified = True
-
-def device_fingerprint():
-    """
-    Gera hash leve do dispositivo do usuário
-    """
-    ip = get_client_ip() or ""
-    ua = request.headers.get("User-Agent", "")
-    accept = request.headers.get("Accept", "")
-    raw = f"{ip}|{ua}|{accept}"
-    return hashlib.sha256(raw.encode()).hexdigest()
 
 # =========================================================
 # ROTAS
@@ -230,9 +241,12 @@ def two_factor():
             regenerate_session()
             login_user(Admin(), fresh=True)
 
-            # SALVANDO DEVICE FINGERPRINT NO REDIS (7 dias)
+            # Salva fingerprint no Redis
             fingerprint = device_fingerprint()
             redis_client.setex(f"fingerprint:admin", 7*24*3600, fingerprint)
+
+            # Pulando verificação na primeira requisição
+            session["skip_fp_check"] = True
 
             return redirect(url_for("dashboard"))
 
@@ -251,15 +265,6 @@ def two_factor():
 @app.route("/admin/dashboard")
 @login_required
 def dashboard():
-    # Validando Device Fingerprint
-    saved_fp = redis_client.get("fingerprint:admin")
-    current_fp = device_fingerprint()
-    if saved_fp and saved_fp != current_fp:
-        flash("Novo dispositivo detectado. Confirme sua identidade.")
-        logout_user()
-        session.clear()
-        return redirect(url_for("login"))
-
     return "🔥 Admin protegido por Redis + 2FA + CSRF + Device Fingerprint + RateLimit"
 
 @app.route("/admin/logout")
