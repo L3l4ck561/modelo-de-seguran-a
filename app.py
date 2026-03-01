@@ -95,9 +95,13 @@ def register_failed_attempt(ip):
 def is_ip_allowed(ip):
     if not ADMIN_ALLOWED_IP:
         return True  # libera todos se variável não estiver definida
+
     try:
-        return ipaddress.ip_address(ip) == ipaddress.ip_address(ADMIN_ALLOWED_IP)
+        # Se for subnet (ex: /64) ou IP único, ambos funcionam
+        network = ipaddress.ip_network(ADMIN_ALLOWED_IP, strict=False)
+        return ipaddress.ip_address(ip) in network
     except ValueError:
+        logger.error("ADMIN_ALLOWED_IP inválido.")
         return False
 
 # =========================================================
