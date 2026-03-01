@@ -30,7 +30,7 @@ if not app.secret_key:
     raise RuntimeError("SECRET_KEY não definido!")
 
 # Proxy do Render
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # Variáveis críticas
 ADMIN_USER = os.getenv("ADMIN_USER")
@@ -110,7 +110,9 @@ def secure_headers(response):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Content-Security-Policy"] = "default-src 'self'"
-    response.headers["Referrer-Policy"] = "no-referrer"
+
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
     if ENV == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -252,6 +254,16 @@ def debug_scheme():
     scheme: {request.scheme}<br>
     is_secure: {request.is_secure}<br>
     """
+
+@app.route("/debug-referrer")
+def debug_referrer():
+    return {
+        "referrer": request.referrer,
+        "host": request.host,
+        "scheme": request.scheme,
+        "is_secure": request.is_secure,
+        "headers": dict(request.headers)
+    }
 
 # =========================================================
 # MAIN
