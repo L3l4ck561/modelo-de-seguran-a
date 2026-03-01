@@ -1,2 +1,2 @@
-pip install Flask Flask-Login Flask-WTF WTForms Werkzeug python-dotenv Flask-Limiter pyotp gunicorn
+pip install Flask Flask-Login Flask-WTF WTForms Werkzeug python-dotenv Flask-Limiter pyotp gunicorn Flask-Session
 pip freeze > requirements.txt

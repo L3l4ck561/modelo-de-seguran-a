@@ -9,3 +9,6 @@ import pyotp
 totp = pyotp.TOTP("SEU_SEGREDO_GERADO")
 print('google authenticator')
 print(totp.provisioning_uri("Admin", issuer_name="SeuSistema"))
+
+import secrets
+print(secrets.token_urlsafe(64))
